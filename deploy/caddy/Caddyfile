@@ -1,0 +1,14 @@
+# Single LAN entrypoint (HTTP for now — see README.deploy.md for how to move
+# to HTTPS once this server is reachable somewhere Let's Encrypt can validate
+# it). pms-modulith owns the whole /api/v1/* namespace; monokek-spring owns
+# everything else under /api/* plus its own /swagger-ui, /license, etc. — the
+# two never overlap, so routing on that one prefix is enough.
+:80 {
+    handle /api/v1/* {
+        reverse_proxy pms-modulith:8081
+    }
+
+    handle {
+        reverse_proxy monokek-spring:8080
+    }
+}

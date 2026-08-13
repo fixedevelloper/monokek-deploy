@@ -1,0 +1,153 @@
+name: monokek
+
+services:
+  mysql:
+    image: mysql:8
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MONOKEK_DB_NAME: ${MONOKEK_DB_NAME}
+      MONOKEK_DB_USERNAME: ${MONOKEK_DB_USERNAME}
+      MONOKEK_DB_PASSWORD: ${MONOKEK_DB_PASSWORD}
+      PMS_DB_NAME: ${PMS_DB_NAME}
+      PMS_DB_USERNAME: ${PMS_DB_USERNAME}
+      PMS_DB_PASSWORD: ${PMS_DB_PASSWORD}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./deploy/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [backend]
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    volumes:
+      - minio-data:/data
+    ports:
+      # Published directly (not proxied through Caddy): MinIO's presigned URLs
+      # are signed against a specific host/port, so app.minio.public-endpoint
+      # must point straight at this port rather than a rewritten proxy path.
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [backend]
+
+  monokek-spring:
+    image: docker.io/${DOCKERHUB_NAMESPACE}/monokek-spring:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_DATABASE: ${MONOKEK_DB_NAME}
+      DB_USERNAME: ${MONOKEK_DB_USERNAME}
+      DB_PASSWORD: ${MONOKEK_DB_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_TTL_MINUTES: ${JWT_TTL_MINUTES:-480}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      ALLOW_DEFAULT_SECRETS: "false"
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      LICENSE_SIGNING_KEY: ${LICENSE_SIGNING_KEY}
+      SERVER_PORT: 8080
+      # Container-to-container: Docker's own DNS resolves this regardless of
+      # the LAN address the server itself is reached at.
+      PMS_API_URL: http://pms-modulith:8081/api/v1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [backend]
+
+  pms-modulith:
+    image: docker.io/${DOCKERHUB_NAMESPACE}/pms-modulith:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      DB_URL: jdbc:mysql://mysql:3306/${PMS_DB_NAME}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true
+      DB_USERNAME: ${PMS_DB_USERNAME}
+      DB_PASSWORD: ${PMS_DB_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      CHANNEL_MANAGER_WEBHOOK_TOKEN: ${CHANNEL_MANAGER_WEBHOOK_TOKEN}
+      PMS_CORS_ALLOWED_ORIGINS: ${PMS_CORS_ALLOWED_ORIGINS}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/v3/api-docs"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [backend]
+
+  backup:
+    image: docker.io/${DOCKERHUB_NAMESPACE}/monokek-backup:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      monokek-spring:
+        # Waits for monokek-spring's MinIO bucket-init ApplicationRunner to
+        # have completed, so the first backup run doesn't race it and find
+        # the bucket missing yet.
+        condition: service_healthy
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MONOKEK_DB_NAME: ${MONOKEK_DB_NAME}
+      PMS_DB_NAME: ${PMS_DB_NAME}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+    volumes:
+      - ./deploy/backups:/backups
+    networks: [backend]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      monokek-spring:
+        condition: service_healthy
+      pms-modulith:
+        condition: service_healthy
+    ports:
+      # The one port reachable from other machines on the LAN.
+      - "80:80"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    networks: [backend]
+
+networks:
+  backend:
+
+volumes:
+  mysql-data:
+  minio-data:
+  caddy-data:
