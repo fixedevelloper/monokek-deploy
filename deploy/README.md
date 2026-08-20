@@ -24,8 +24,14 @@ config, pas du code).
 ```bash
 docker login   # identifiants fournis avec la licence — images privées
 cp .env.example .env
-# éditer .env : mots de passe DB/MinIO, JWT_SECRET, LICENSE_SIGNING_KEY,
-# MINIO_PUBLIC_ENDPOINT (IP ou nom LAN du serveur), DOCKERHUB_NAMESPACE
+# éditer .env : mots de passe DB/MinIO, LICENSE_SIGNING_KEY,
+# MINIO_PUBLIC_ENDPOINT (IP ou nom LAN du serveur), DOCKERHUB_NAMESPACE,
+# et le bloc monokek-identity : IDENTITY_ISSUER (adresse LAN de CE serveur,
+# via Caddy — ex. http://192.168.1.50:8090), le couple de clés RSA
+# IDENTITY_RSA_PRIVATE_KEY_PEM/IDENTITY_RSA_PUBLIC_KEY_PEM (commande openssl
+# fournie en commentaire dans .env.example — à générer une seule fois, sinon
+# chaque redémarrage invalide tous les tokens en cours), et les trois secrets
+# clients IDENTITY_*_CLIENT_SECRET
 
 docker compose pull
 docker compose up -d

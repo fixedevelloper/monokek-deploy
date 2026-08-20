@@ -1,14 +1,57 @@
 # Single LAN entrypoint (HTTP for now — see README.deploy.md for how to move
 # to HTTPS once this server is reachable somewhere Let's Encrypt can validate
-# it). pms-modulith owns the whole /api/v1/* namespace; monokek-spring owns
-# everything else under /api/* plus its own /swagger-ui, /license, etc. — the
-# two never overlap, so routing on that one prefix is enough.
+# it). Three backends share this one listener:
+#   - pms-modulith owns the whole /api/v1/* namespace.
+#   - monokek-identity owns OAuth2/OIDC (/oauth2/*, /.well-known/*) plus the
+#     handful of /api/* routes that used to live on monokek-spring before its
+#     user-management/authentication code was extracted (login, /me, PIN/
+#     password, staff admin).
+#   - monokek-spring owns everything else under /api/*, plus its own
+#     /swagger-ui, /license, etc.
+# /internal/* on either monokek-spring or monokek-identity is server-to-server
+# only (client_credentials-scoped) — those calls happen directly over the
+# `backend` Docker network, never through this public listener, so it's
+# blocked here as defense in depth on top of the scope check each app already
+# enforces.
 :80 {
-    handle /api/v1/* {
-        reverse_proxy pms-modulith:8081
-    }
+	handle /api/v1/* {
+		reverse_proxy pms-modulith:8081
+	}
 
-    handle {
-        reverse_proxy monokek-spring:8080
-    }
+	handle /oauth2/* {
+		reverse_proxy monokek-identity:8082
+	}
+
+	handle /.well-known/* {
+		reverse_proxy monokek-identity:8082
+	}
+
+	handle /api/login {
+		reverse_proxy monokek-identity:8082
+	}
+
+	handle /api/logout {
+		reverse_proxy monokek-identity:8082
+	}
+
+	handle /api/me {
+		reverse_proxy monokek-identity:8082
+	}
+
+	handle /api/auth/* {
+		reverse_proxy monokek-identity:8082
+	}
+
+	@staffAdmin path /api/admin/staff /api/admin/staff/*
+	handle @staffAdmin {
+		reverse_proxy monokek-identity:8082
+	}
+
+	handle /internal/* {
+		respond 404
+	}
+
+	handle {
+		reverse_proxy monokek-spring:8080
+	}
 }

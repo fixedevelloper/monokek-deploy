@@ -1,5 +1,11 @@
 name: monokek
 
+# Client id monokek-identity registers for monokek-spring's client_credentials calls
+# (see that service's ClientSeeder) — referenced by both monokek-identity's and
+# monokek-spring's own env blocks below via the anchor, so the two can't silently
+# drift apart the way two separate literals could.
+x-monokek-spring-client-id: &monokek_spring_client_id monokek-spring-service
+
 services:
   mysql:
     image: mysql:8
@@ -12,6 +18,12 @@ services:
       PMS_DB_NAME: ${PMS_DB_NAME}
       PMS_DB_USERNAME: ${PMS_DB_USERNAME}
       PMS_DB_PASSWORD: ${PMS_DB_PASSWORD}
+      # Read by deploy/mysql/init/01-init-databases.sh, which runs inside this
+      # container on first boot (empty volume) — without these, that script
+      # aborts on the unset variable (set -u) and the whole stack's first
+      # bring-up fails.
+      IDENTITY_DB_USERNAME: ${IDENTITY_DB_USERNAME}
+      IDENTITY_DB_PASSWORD: ${IDENTITY_DB_PASSWORD}
     volumes:
       - mysql-data:/var/lib/mysql
       - ./deploy/mysql/init:/docker-entrypoint-initdb.d:ro
@@ -44,6 +56,66 @@ services:
       retries: 10
     networks: [backend]
 
+  # Central identity provider (user management + OAuth2/OIDC authentication),
+  # extracted out of monokek-spring so its uptime never affects pms-modulith's
+  # ability to validate tokens — see monokek-identity/README and the plan this
+  # was built from. Connects to the SAME schema as monokek-spring (MONOKEK_DB_NAME)
+  # with its own, narrower-privileged DB user — see deploy/mysql/init.
+  monokek-identity:
+    image: docker.io/${DOCKERHUB_NAMESPACE}/monokek-identity:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      # monokek-spring's own V1 Flyway migration is what creates the shared
+      # users/roles/permissions/user_roles/user_permissions tables in this same
+      # schema (see the comment above) — on a fresh empty database, starting
+      # monokek-identity before that migration has run lets its own Flyway/Hibernate
+      # touch the schema first, which makes monokek-spring's Flyway see a non-empty
+      # schema and baseline-on-migrate past V1 instead of running it, permanently
+      # breaking the schema (roles/users never get created). Waiting for healthy
+      # here (not just started) ensures monokek-spring's migration has actually
+      # completed first.
+      monokek-spring:
+        condition: service_healthy
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_DATABASE: ${MONOKEK_DB_NAME}
+      DB_USERNAME: ${IDENTITY_DB_USERNAME}
+      DB_PASSWORD: ${IDENTITY_DB_PASSWORD}
+      SERVER_PORT: 8082
+      # Same value as monokek-spring's own CORS_ALLOWED_ORIGINS below — Caddy proxies
+      # /api/login, /api/logout, /api/me, /api/auth/**, /api/admin/staff/** straight to
+      # this service (see the Caddyfile), so it needs its own CORS config for those
+      # browser-facing routes, distinct from monokek-spring's.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      # Public base URL clients see (through Caddy) — must match the LAN address
+      # used for CADDY_PUBLIC_URL below. A mismatch here breaks JWKS/issuer
+      # discovery for any client that validates the "iss" claim against it.
+      IDENTITY_ISSUER: ${IDENTITY_ISSUER}
+      # One-time-generated keypair so tokens survive redeploys — see deploy/README
+      # for the openssl one-liner to generate these. Leaving them unset works (an
+      # ephemeral keypair is generated at boot) but invalidates every outstanding
+      # token on every restart.
+      IDENTITY_RSA_PRIVATE_KEY_PEM: ${IDENTITY_RSA_PRIVATE_KEY_PEM}
+      IDENTITY_RSA_PUBLIC_KEY_PEM: ${IDENTITY_RSA_PUBLIC_KEY_PEM}
+      IDENTITY_POS_CLIENT_ID: monokek-pos
+      IDENTITY_POS_CLIENT_SECRET: ${IDENTITY_POS_CLIENT_SECRET}
+      IDENTITY_MONOKEK_SPRING_CLIENT_ID: *monokek_spring_client_id
+      IDENTITY_MONOKEK_SPRING_CLIENT_SECRET: ${IDENTITY_MONOKEK_SPRING_CLIENT_SECRET}
+      IDENTITY_INTERNAL_CLIENT_ID: monokek-identity-internal
+      IDENTITY_INTERNAL_CLIENT_SECRET: ${IDENTITY_INTERNAL_CLIENT_SECRET}
+      # Container-to-container: HttpActivityNotifier's webhook target.
+      MONOKEK_SPRING_API_URL: http://monokek-spring:8080
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/oauth2/jwks"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [backend]
+
   monokek-spring:
     image: docker.io/${DOCKERHUB_NAMESPACE}/monokek-spring:${IMAGE_TAG:-latest}
     restart: unless-stopped
@@ -52,14 +124,32 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      # No dependency on monokek-identity: this app boots fine even if
+      # monokek-identity isn't up yet (JWKS is fetched lazily, on first token
+      # validation). It's actually the other way around — monokek-identity depends
+      # on THIS service being healthy first, since monokek-spring's own V1 Flyway
+      # migration is what creates the shared users/roles/etc. tables in this
+      # schema (see monokek-identity's depends_on above for why the ordering
+      # matters on a fresh database).
     environment:
       DB_HOST: mysql
       DB_PORT: 3306
       DB_DATABASE: ${MONOKEK_DB_NAME}
       DB_USERNAME: ${MONOKEK_DB_USERNAME}
       DB_PASSWORD: ${MONOKEK_DB_PASSWORD}
-      JWT_SECRET: ${JWT_SECRET}
-      JWT_TTL_MINUTES: ${JWT_TTL_MINUTES:-480}
+      # Container-to-container: monokek-spring validates tokens against
+      # monokek-identity's JWKS and calls its /internal/users — no shared secret
+      # anymore, and no reference to pms-modulith either way (see the plan).
+      IDENTITY_JWK_SET_URI: http://monokek-identity:8082/oauth2/jwks
+      # NOT the internal http://monokek-identity:8082 address: every token's "iss" claim
+      # is stamped with monokek-identity's own IDENTITY_ISSUER (the public Caddy URL,
+      # see that service's env block above) since that's what issued it — this must be
+      # the exact same value for jwtDecoder's issuer check to ever pass.
+      IDENTITY_ISSUER: ${IDENTITY_ISSUER}
+      IDENTITY_API_URL: http://monokek-identity:8082
+      IDENTITY_TOKEN_URI: http://monokek-identity:8082/oauth2/token
+      IDENTITY_MONOKEK_SPRING_CLIENT_ID: *monokek_spring_client_id
+      IDENTITY_MONOKEK_SPRING_CLIENT_SECRET: ${IDENTITY_MONOKEK_SPRING_CLIENT_SECRET}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
       ALLOW_DEFAULT_SECRETS: "false"
       MINIO_ENDPOINT: http://minio:9000
@@ -86,12 +176,21 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      # Same reasoning as monokek-spring's dependency above — and note this app
+      # has NO dependency, direct or config, on monokek-spring at all: a
+      # monokek-spring outage has zero effect on pms-modulith.
+      monokek-identity:
+        condition: service_started
     environment:
       SPRING_PROFILES_ACTIVE: prod
       DB_URL: jdbc:mysql://mysql:3306/${PMS_DB_NAME}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true
       DB_USERNAME: ${PMS_DB_USERNAME}
       DB_PASSWORD: ${PMS_DB_PASSWORD}
-      JWT_SECRET: ${JWT_SECRET}
+      IDENTITY_JWK_SET_URI: http://monokek-identity:8082/oauth2/jwks
+      # Same value as monokek-identity's own IDENTITY_ISSUER (the public Caddy URL) —
+      # see monokek-spring's identical env var above for why this can't be the internal
+      # http://monokek-identity:8082 address.
+      IDENTITY_ISSUER: ${IDENTITY_ISSUER}
       CHANNEL_MANAGER_WEBHOOK_TOKEN: ${CHANNEL_MANAGER_WEBHOOK_TOKEN}
       PMS_CORS_ALLOWED_ORIGINS: ${PMS_CORS_ALLOWED_ORIGINS}
     healthcheck:
@@ -132,13 +231,24 @@ services:
     image: caddy:2-alpine
     restart: unless-stopped
     depends_on:
+      # service_started, not service_healthy, for all three: Caddy's reverse_proxy
+      # already retries/502s gracefully against a backend that's merely slow to
+      # become healthy, so gating Caddy's own startup on "healthy" bought nothing
+      # except a single point of failure — before this fix, monokek-spring never
+      # becoming healthy at a stack (re)start meant Caddy itself never started
+      # either, taking pms-modulith's reachability down with it even though
+      # pms-modulith was perfectly healthy. Each backend's own path is still only
+      # ever reverse-proxied to that one backend, so an individual outage now only
+      # 502s that backend's own routes.
       monokek-spring:
-        condition: service_healthy
+        condition: service_started
+      monokek-identity:
+        condition: service_started
       pms-modulith:
-        condition: service_healthy
+        condition: service_started
     ports:
       # The one port reachable from other machines on the LAN.
-      - "80:80"
+      - "8090:80"
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
