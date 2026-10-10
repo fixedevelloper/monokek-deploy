@@ -44,11 +44,13 @@ services:
     volumes:
       - minio-data:/data
     ports:
-      # Published directly (not proxied through Caddy): MinIO's presigned URLs
-      # are signed against a specific host/port, so app.minio.public-endpoint
-      # must point straight at this port rather than a rewritten proxy path.
-      - "9000:9000"
-      - "9001:9001"
+      # The S3 API (9000) is deliberately NOT published: monokek-spring and the
+      # backup job reach it as minio:9000 on the Docker network, and clients read
+      # files through Caddy's read-only /media/* route (see deploy/caddy/Caddyfile).
+      #
+      # Admin console: this machine only (it exposes the MinIO root credentials
+      # login page to the whole LAN otherwise).
+      - "127.0.0.1:9001:9001"
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 5s
@@ -154,6 +156,9 @@ services:
       ALLOW_DEFAULT_SECRETS: "false"
       MINIO_ENDPOINT: http://minio:9000
       MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT}
+      # Path Caddy exposes the bucket under: uploads are stored as "/media/<bucket>/<key>" (no host
+      # baked in) and responses are completed with the origin each client used to reach us.
+      MEDIA_BASE_PATH: ${MEDIA_BASE_PATH:-/media}
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_BUCKET: ${MINIO_BUCKET}

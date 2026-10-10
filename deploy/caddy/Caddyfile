@@ -8,12 +8,43 @@
 #     password, staff admin).
 #   - monokek-spring owns everything else under /api/*, plus its own
 #     /swagger-ui, /license, etc.
+# /media/* is the public face of the MinIO bucket (product images, store logo): read-only,
+# bucket-scoped, cached for a year (object keys are UUIDs, so they never change). Going through
+# this listener means clients never need to know MinIO's own host/port.
 # /internal/* on either monokek-spring or monokek-identity is server-to-server
 # only (client_credentials-scoped) — those calls happen directly over the
 # `backend` Docker network, never through this public listener, so it's
 # blocked here as defense in depth on top of the scope check each app already
 # enforces.
 :80 {
+	# Compress JSON only. Never SSE (text/event-stream): buffering would stall the live events.
+	encode {
+		zstd
+		gzip
+		match {
+			header Content-Type application/json*
+		}
+	}
+
+	# --- Media: anonymous, read-only access to the MinIO bucket -------------------------------
+	# /media/<bucket>/<key>  ->  minio:9000/<bucket>/<key>
+	# The bucket name must match MINIO_BUCKET (.env). Anything else under /media is a 404.
+	@media path /media/monokek/*
+	handle @media {
+		@mediaWrite not method GET HEAD OPTIONS
+		respond @mediaWrite "Method not allowed" 405
+
+		uri strip_prefix /media
+		header Cache-Control "public, max-age=31536000, immutable"
+		reverse_proxy minio:9000 {
+			header_up Host {upstream_hostport}
+		}
+	}
+
+	handle /media/* {
+		respond 404
+	}
+
 	handle /api/v1/* {
 		reverse_proxy pms-modulith:8081
 	}
