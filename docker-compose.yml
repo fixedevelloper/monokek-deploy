@@ -34,28 +34,39 @@ services:
       retries: 20
     networks: [backend]
 
-  minio:
-    image: minio/minio:latest
+  # Object storage (product images, store logo). SeaweedFS in single-container mode
+  # (master + volume + filer + S3 gateway). Replaces MinIO: same S3 API, so monokek-spring's
+  # MinIO SDK client and the "mc" backup job keep working unchanged against port 8333.
+  seaweedfs:
+    image: chrislusf/seaweedfs:${SEAWEEDFS_VERSION:-latest}
     restart: unless-stopped
-    command: server /data --console-address ":9001"
+    # The S3 identities file is generated at start from the env credentials (weed can't expand
+    # env vars in it). "anonymous" = unauthenticated read, which is what Caddy's /media/* route
+    # relies on; all writes need the access key. Only Caddy/monokek-spring/backup can reach 8333
+    # (not published), and Caddy itself only forwards GET/HEAD.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        cat > /tmp/s3.json <<EOF
+        {"identities":[
+          {"name":"monokek","credentials":[{"accessKey":"$${S3_ACCESS_KEY}","secretKey":"$${S3_SECRET_KEY}"}],"actions":["Admin","Read","Write","List","Tagging"]},
+          {"name":"anonymous","actions":["Read"]}
+        ]}
+        EOF
+        exec weed server -dir=/data -master.volumeSizeLimitMB=1024 -s3 -s3.port=8333 -s3.config=/tmp/s3.json
     environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+      S3_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      S3_SECRET_KEY: ${MINIO_SECRET_KEY}
     volumes:
-      - minio-data:/data
-    ports:
-      # The S3 API (9000) is deliberately NOT published: monokek-spring and the
-      # backup job reach it as minio:9000 on the Docker network, and clients read
-      # files through Caddy's read-only /media/* route (see deploy/caddy/Caddyfile).
-      #
-      # Admin console: this machine only (it exposes the MinIO root credentials
-      # login page to the whole LAN otherwise).
-      - "127.0.0.1:9001:9001"
+      - seaweedfs-data:/data
+    # No ports published: the S3 API (8333), master (9333) and filer (8888) are reached as
+    # seaweedfs:<port> on the Docker network only; clients read files via Caddy's /media/*.
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9333/cluster/status"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
     networks: [backend]
 
   # Central identity provider (user management + OAuth2/OIDC authentication),
@@ -124,7 +135,7 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
-      minio:
+      seaweedfs:
         condition: service_healthy
       # No dependency on monokek-identity: this app boots fine even if
       # monokek-identity isn't up yet (JWKS is fetched lazily, on first token
@@ -154,7 +165,7 @@ services:
       IDENTITY_MONOKEK_SPRING_CLIENT_SECRET: ${IDENTITY_MONOKEK_SPRING_CLIENT_SECRET}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
       ALLOW_DEFAULT_SECRETS: "false"
-      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ENDPOINT: http://seaweedfs:8333
       MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT}
       # Path Caddy exposes the bucket under: uploads are stored as "/media/<bucket>/<key>" (no host
       # baked in) and responses are completed with the origin each client used to reach us.
@@ -162,7 +173,7 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_BUCKET: ${MINIO_BUCKET}
-      LICENSE_SIGNING_KEY: ${LICENSE_SIGNING_KEY}
+      LICENSE_PUBLIC_KEY: ${LICENSE_PUBLIC_KEY}
       SERVER_PORT: 8080
       # Container-to-container: Docker's own DNS resolves this regardless of
       # the LAN address the server itself is reached at.
@@ -212,10 +223,10 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
-      minio:
+      seaweedfs:
         condition: service_healthy
       monokek-spring:
-        # Waits for monokek-spring's MinIO bucket-init ApplicationRunner to
+        # Waits for monokek-spring's bucket-init ApplicationRunner to
         # have completed, so the first backup run doesn't race it and find
         # the bucket missing yet.
         condition: service_healthy
@@ -251,8 +262,16 @@ services:
         condition: service_started
       pms-modulith:
         condition: service_started
+    environment:
+      # LAN IP or name clients use to reach this server — goes into the TLS certificate (SAN).
+      # Required: a wrong value makes every client reject the certificate.
+      CADDY_HOST: ${CADDY_HOST:?Définir CADDY_HOST dans .env (IP ou nom LAN du serveur)}
+      # Full public HTTPS base URL (with port), used for the HTTP -> HTTPS redirect.
+      CADDY_HTTPS_URL: ${CADDY_HTTPS_URL:?Définir CADDY_HTTPS_URL dans .env (ex. https://192.168.1.50:8443)}
     ports:
-      # The one port reachable from other machines on the LAN.
+      # Reachable from other machines on the LAN. 8443 = the real (HTTPS) entrypoint; 8090 (HTTP) only
+      # serves the CA certificate (/ca.crt) and /api/ping, and redirects everything else to HTTPS.
+      - "8443:443"
       - "8090:80"
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
@@ -264,5 +283,5 @@ networks:
 
 volumes:
   mysql-data:
-  minio-data:
+  seaweedfs-data:
   caddy-data:

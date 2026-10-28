@@ -1,6 +1,8 @@
-# Single LAN entrypoint (HTTP for now — see README.deploy.md for how to move
-# to HTTPS once this server is reachable somewhere Let's Encrypt can validate
-# it). Three backends share this one listener:
+# Single LAN entrypoint, HTTPS with Caddy's own internal CA (`tls internal`): this server is
+# reached by LAN IP/name, so no public CA (Let's Encrypt) can validate it. Clients must trust the
+# CA's root certificate once — it is served over plain HTTP at http://<host>:<http-port>/ca.crt
+# (public certificate, not a secret). Plain HTTP only serves that file and /api/ping; everything
+# else redirects to HTTPS. Three backends share the HTTPS listener:
 #   - pms-modulith owns the whole /api/v1/* namespace.
 #   - monokek-identity owns OAuth2/OIDC (/oauth2/*, /.well-known/*) plus the
 #     handful of /api/* routes that used to live on monokek-spring before its
@@ -8,15 +10,74 @@
 #     password, staff admin).
 #   - monokek-spring owns everything else under /api/*, plus its own
 #     /swagger-ui, /license, etc.
-# /media/* is the public face of the MinIO bucket (product images, store logo): read-only,
+# /media/* is the public face of the storage bucket (product images, store logo): read-only,
 # bucket-scoped, cached for a year (object keys are UUIDs, so they never change). Going through
-# this listener means clients never need to know MinIO's own host/port.
+# this listener means clients never need to know the storage backend's own host/port.
 # /internal/* on either monokek-spring or monokek-identity is server-to-server
 # only (client_credentials-scoped) — those calls happen directly over the
 # `backend` Docker network, never through this public listener, so it's
 # blocked here as defense in depth on top of the scope check each app already
 # enforces.
-:80 {
+{
+	# The HTTP site below does its own redirect, with the exceptions it needs (/ca.crt, /api/ping).
+	auto_https disable_redirects
+
+	# Clients reach this server by IP, and a TLS client never sends SNI for an IP address. Without
+	# this, Caddy looks for a certificate matching the address the connection arrived on — inside
+	# Docker that is the container's own bridge IP, not CADDY_HOST — and fails the handshake with
+	# "internal error".
+	default_sni {$CADDY_HOST:localhost}
+
+	# HTTP/3 (UDP 443) is not published by docker-compose.yml: don't advertise it via alt-svc.
+	servers {
+		protocols h1 h2
+	}
+}
+
+(security_headers) {
+	header {
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), camera=(), microphone=()"
+		-Server
+	}
+}
+
+# --- HTTP: CA bootstrap + discovery only --------------------------------------------------------
+http://:80 {
+	import security_headers
+
+	# Root certificate of Caddy's internal CA (created on the first HTTPS start). Install it in the
+	# trust store of every POS machine / tablet — see deploy/README.md.
+	handle /ca.crt {
+		root * /data/caddy/pki/authorities/local
+		rewrite * /root.crt
+		header Content-Type "application/x-x509-ca-cert"
+		header Content-Disposition `attachment; filename="monokek-ca.crt"`
+		file_server
+	}
+
+	# The Tauri "server address" dialog probes this before saving an address.
+	handle /api/ping {
+		reverse_proxy monokek-spring:8080
+	}
+
+	handle {
+		redir {$CADDY_HTTPS_URL:https://localhost:8443}{uri} 308
+	}
+}
+
+# --- HTTPS: the real entrypoint -----------------------------------------------------------------
+# CADDY_HOST = the LAN IP or name clients use (it ends up in the certificate's SAN).
+https://{$CADDY_HOST:localhost} {
+	tls internal
+	import security_headers
+	header Strict-Transport-Security "max-age=2592000"
+
+	# JSON/OAuth responses are never rendered by a browser: forbid any active content outright.
+	@api path /api/* /oauth2/* /.well-known/*
+	header @api Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
+
 	# Compress JSON only. Never SSE (text/event-stream): buffering would stall the live events.
 	encode {
 		zstd
@@ -26,8 +87,8 @@
 		}
 	}
 
-	# --- Media: anonymous, read-only access to the MinIO bucket -------------------------------
-	# /media/<bucket>/<key>  ->  minio:9000/<bucket>/<key>
+	# --- Media: anonymous, read-only access to the storage bucket -------------------------------
+	# /media/<bucket>/<key>  ->  seaweedfs:8333/<bucket>/<key>
 	# The bucket name must match MINIO_BUCKET (.env). Anything else under /media is a 404.
 	@media path /media/monokek/*
 	handle @media {
@@ -36,7 +97,7 @@
 
 		uri strip_prefix /media
 		header Cache-Control "public, max-age=31536000, immutable"
-		reverse_proxy minio:9000 {
+		reverse_proxy seaweedfs:8333 {
 			header_up Host {upstream_hostport}
 		}
 	}

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs forever: dumps both MySQL databases and mirrors the MinIO bucket on a
+# Runs forever: dumps both MySQL databases and mirrors the object-storage bucket on a
 # fixed interval, then prunes anything older than the retention window.
 # Simpler to reason about in a container than wiring up a real cron daemon.
 set -euo pipefail
@@ -9,7 +9,7 @@ INTERVAL_SECONDS="${BACKUP_INTERVAL_SECONDS:-86400}"
 
 mkdir -p /backups/mysql /backups/minio
 
-mc alias set backup-target "http://minio:9000" "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}" >/dev/null
+mc alias set backup-target "http://seaweedfs:8333" "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}" >/dev/null
 
 run_backup() {
     local stamp
@@ -34,7 +34,7 @@ run_backup() {
     done
 
     mc mirror --quiet "backup-target/${MINIO_BUCKET}" "/backups/minio/${stamp}" \
-        || echo "[backup] WARN: minio mirror failed, continuing"
+        || echo "[backup] WARN: storage mirror failed, continuing"
 
     find /backups/mysql -name '*.sql.gz' -mtime "+${RETENTION_DAYS}" -delete
     find /backups/minio -maxdepth 1 -mindepth 1 -type d -mtime "+${RETENTION_DAYS}" -exec rm -rf {} +
