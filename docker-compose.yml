@@ -268,13 +268,11 @@ services:
       # LAN IP or name clients use to reach this server — goes into the TLS certificate (SAN).
       # Required: a wrong value makes every client reject the certificate.
       CADDY_HOST: ${CADDY_HOST:?Définir CADDY_HOST dans .env (IP ou nom LAN du serveur)}
-      # Full public HTTPS base URL (with port), used for the HTTP -> HTTPS redirect.
-      CADDY_HTTPS_URL: ${CADDY_HTTPS_URL:?Définir CADDY_HTTPS_URL dans .env (ex. https://192.168.1.50:8443)}
     ports:
-      # Reachable from other machines on the LAN. 8443 = the real (HTTPS) entrypoint; 8090 (HTTP) only
-      # serves the CA certificate (/ca.crt) and /api/ping, and redirects everything else to HTTPS.
+      # 8090 = HTTP, published on 127.0.0.1 ONLY (local setup: POS and server on one machine; the
+      # API is served in clear text here). 8443 = HTTPS, reachable from the LAN for other clients.
       - "8443:443"
-      - "8090:80"
+      - "127.0.0.1:8090:80"
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

@@ -1,8 +1,8 @@
-# Single LAN entrypoint, HTTPS with Caddy's own internal CA (`tls internal`): this server is
-# reached by LAN IP/name, so no public CA (Let's Encrypt) can validate it. Clients must trust the
-# CA's root certificate once — it is served over plain HTTP at http://<host>:<http-port>/ca.crt
-# (public certificate, not a secret). Plain HTTP only serves that file and /api/ping; everything
-# else redirects to HTTPS. Three backends share the HTTPS listener:
+# Two listeners serve the SAME routes (snippet app_routes below):
+#   - HTTP  (:80, published on 127.0.0.1:8090 only): the local setup — POS and server on one machine.
+#   - HTTPS (:443, published on 8443): Caddy's own internal CA (`tls internal`), for clients on the
+#     LAN. They must trust the CA's root certificate once, served at http://127.0.0.1:8090/ca.crt.
+# Three backends share the routes:
 #   - pms-modulith owns the whole /api/v1/* namespace.
 #   - monokek-identity owns OAuth2/OIDC (/oauth2/*, /.well-known/*) plus the
 #     handful of /api/* routes that used to live on monokek-spring before its
@@ -19,7 +19,6 @@
 # blocked here as defense in depth on top of the scope check each app already
 # enforces.
 {
-	# The HTTP site below does its own redirect, with the exceptions it needs (/ca.crt, /api/ping).
 	auto_https disable_redirects
 
 	# Clients reach this server by IP, and a TLS client never sends SNI for an IP address. Without
@@ -43,37 +42,7 @@
 	}
 }
 
-# --- HTTP: CA bootstrap + discovery only --------------------------------------------------------
-http://:80 {
-	import security_headers
-
-	# Root certificate of Caddy's internal CA (created on the first HTTPS start). Install it in the
-	# trust store of every POS machine / tablet — see deploy/README.md.
-	handle /ca.crt {
-		root * /data/caddy/pki/authorities/local
-		rewrite * /root.crt
-		header Content-Type "application/x-x509-ca-cert"
-		header Content-Disposition `attachment; filename="monokek-ca.crt"`
-		file_server
-	}
-
-	# The Tauri "server address" dialog probes this before saving an address.
-	handle /api/ping {
-		reverse_proxy monokek-spring:8080
-	}
-
-	handle {
-		redir {$CADDY_HTTPS_URL:https://localhost:8443}{uri} 308
-	}
-}
-
-# --- HTTPS: the real entrypoint -----------------------------------------------------------------
-# CADDY_HOST = the LAN IP or name clients use (it ends up in the certificate's SAN).
-https://{$CADDY_HOST:localhost} {
-	tls internal
-	import security_headers
-	header Strict-Transport-Security "max-age=2592000"
-
+(app_routes) {
 	# JSON/OAuth responses are never rendered by a browser: forbid any active content outright.
 	@api path /api/* /oauth2/* /.well-known/*
 	header @api Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
@@ -146,4 +115,38 @@ https://{$CADDY_HOST:localhost} {
 	handle {
 		reverse_proxy monokek-spring:8080
 	}
+}
+
+# --- HTTP: local-only entrypoint (docker-compose publishes it on 127.0.0.1 only) ----------------
+http://:80 {
+	import security_headers
+
+	# Root certificate of Caddy's internal CA (created on the first HTTPS start). Install it in the
+	# trust store of every POS machine / tablet — see deploy/README.md.
+	handle /ca.crt {
+		root * /data/caddy/pki/authorities/local
+		rewrite * /root.crt
+		header Content-Type "application/x-x509-ca-cert"
+		header Content-Disposition `attachment; filename="monokek-ca.crt"`
+		file_server
+	}
+
+	# The Tauri "server address" dialog probes this before saving an address.
+	handle /api/ping {
+		reverse_proxy monokek-spring:8080
+	}
+
+	# Local HTTP setup: the whole app is served here too (no redirect to HTTPS).
+	import app_routes
+}
+
+# --- HTTPS: the real entrypoint -----------------------------------------------------------------
+# CADDY_HOST = the LAN IP or name clients use (it ends up in the certificate's SAN).
+https://{$CADDY_HOST:localhost} {
+	tls internal
+	import security_headers
+	header Strict-Transport-Security "max-age=2592000"
+
+	# Same routes as the HTTP listener above (single definition: snippet app_routes).
+	import app_routes
 }
