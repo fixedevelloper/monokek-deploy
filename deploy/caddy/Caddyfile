@@ -42,6 +42,20 @@
 	}
 }
 
+# Public root certificate of Caddy's internal CA — served on both listeners so a phone/tablet that
+# only reaches the HTTPS port (8443) can still download it (it is a public certificate, not a secret).
+(ca_cert) {
+	# Root certificate of Caddy's internal CA (created on the first HTTPS start). Install it in the
+	# trust store of every POS machine / tablet — see deploy/README.md.
+	handle /ca.crt {
+		root * /data/caddy/pki/authorities/local
+		rewrite * /root.crt
+		header Content-Type "application/x-x509-ca-cert"
+		header Content-Disposition `attachment; filename="monokek-ca.crt"`
+		file_server
+	}
+}
+
 (app_routes) {
 	# JSON/OAuth responses are never rendered by a browser: forbid any active content outright.
 	@api path /api/* /oauth2/* /.well-known/*
@@ -121,15 +135,7 @@
 http://:80 {
 	import security_headers
 
-	# Root certificate of Caddy's internal CA (created on the first HTTPS start). Install it in the
-	# trust store of every POS machine / tablet — see deploy/README.md.
-	handle /ca.crt {
-		root * /data/caddy/pki/authorities/local
-		rewrite * /root.crt
-		header Content-Type "application/x-x509-ca-cert"
-		header Content-Disposition `attachment; filename="monokek-ca.crt"`
-		file_server
-	}
+	import ca_cert
 
 	# The Tauri "server address" dialog probes this before saving an address.
 	handle /api/ping {
@@ -146,6 +152,8 @@ https://{$CADDY_HOST:localhost} {
 	tls internal
 	import security_headers
 	header Strict-Transport-Security "max-age=2592000"
+
+	import ca_cert
 
 	# Same routes as the HTTP listener above (single definition: snippet app_routes).
 	import app_routes

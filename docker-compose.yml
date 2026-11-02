@@ -269,10 +269,10 @@ services:
       # Required: a wrong value makes every client reject the certificate.
       CADDY_HOST: ${CADDY_HOST:?Définir CADDY_HOST dans .env (IP ou nom LAN du serveur)}
     ports:
-      # 8090 = HTTP, published on 127.0.0.1 ONLY (local setup: POS and server on one machine; the
-      # API is served in clear text here). 8443 = HTTPS, reachable from the LAN for other clients.
+      # 8090 = HTTP (API in clear text). Bound to 127.0.0.1 by default (POS and server on one machine);
+      # set CADDY_HTTP_BIND=0.0.0.0 in .env to let other LAN devices use it. 8443 = HTTPS, LAN-wide.
       - "8443:443"
-      - "127.0.0.1:8090:80"
+      - "${CADDY_HTTP_BIND:-127.0.0.1}:8090:80"
     volumes:
       - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
