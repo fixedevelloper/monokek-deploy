@@ -64,9 +64,10 @@ services:
     # seaweedfs:<port> on the Docker network only; clients read files via Caddy's /media/*.
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:9333/cluster/status"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
-      retries: 20
+      retries: 30
+      start_period: 90s
     networks: [backend]
 
   # Central identity provider (user management + OAuth2/OIDC authentication),
