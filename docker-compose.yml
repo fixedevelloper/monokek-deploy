@@ -63,7 +63,8 @@ services:
     # No ports published: the S3 API (8333), master (9333) and filer (8888) are reached as
     # seaweedfs:<port> on the Docker network only; clients read files via Caddy's /media/*.
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9333/cluster/status"]
+      # weed binds to the container IP, not 127.0.0.1, so "localhost" is refused.
+      test: ["CMD-SHELL", "wget -q --spider http://$$(hostname -i | cut -d' ' -f1):9333/cluster/status"]
       interval: 10s
       timeout: 5s
       retries: 30
