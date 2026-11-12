@@ -240,9 +240,14 @@ services:
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_BUCKET: ${MINIO_BUCKET}
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+      BACKUP_KEEP_MIN: ${BACKUP_KEEP_MIN:-7}
       BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
     volumes:
-      - ./deploy/backups:/backups
+      # One sub-folder PER COMPOSE PROJECT. The purge in backup.sh deletes old files, so two stacks (a real one and a test one run with
+      # `-p test`, a second environment...) must never share a folder: a test stack once emptied the real one's history this way.
+      # Point BACKUP_DIR at another disk if you like (the project name is still appended). Not a named volume on purpose:
+      # `docker compose down -v` would then delete the backups together with the database.
+      - ${BACKUP_DIR:-./deploy/backups}/${COMPOSE_PROJECT_NAME}:/backups
     networks: [backend]
 
   caddy:

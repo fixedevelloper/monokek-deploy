@@ -304,7 +304,7 @@ déjà fusionnés restent masqués (`deleted_at`), comme n'importe quel produit 
 - **Vérifié** (conteneurs jetables) : les deux bases sont sauvegardées et un dump **se restaure** (mêmes lignes), le contenu du stockage est copié, le conteneur ne plante plus.
 - **À savoir** : la copie du stockage reste un simple avertissement si elle échoue (`WARN: storage mirror failed`) ; le conteneur continue. Surveillez cette ligne dans ses logs.
 - **Au déploiement** : le compose utilise un seul `IMAGE_TAG`. Mettre `monokek-backup` en `stock-entrepot-2` (ou re-étiqueter spring et pms en `-2` pour tout aligner).
-  Après la mise à jour, **vérifier qu'une sauvegarde est bien produite** (`deploy/backups/mysql/*.sql.gz` non vide) avant de s'y fier.
+  Après la mise à jour, **vérifier qu'une sauvegarde est bien produite** (`deploy/backups/<projet>/mysql/*.sql.gz` non vide ; le dossier de sauvegarde est désormais un sous-dossier du nom du projet compose, voir `deploy/README.md`) avant de s'y fier.
 
 
 ---

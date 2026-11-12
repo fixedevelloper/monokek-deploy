@@ -5,9 +5,26 @@
 set -euo pipefail
 
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
+KEEP_MIN="${BACKUP_KEEP_MIN:-7}"
 INTERVAL_SECONDS="${BACKUP_INTERVAL_SECONDS:-86400}"
 
 mkdir -p /backups/mysql /backups/minio
+
+# --- Ownership of the backup folder ------------------------------------------------------------------------------------------
+# The purge below deletes files. A folder must therefore only ever be written (and purged) by the stack whose database it holds:
+# the folder remembers the MySQL server_uuid it belongs to, and a stack with another database REFUSES to touch it. (A test stack
+# once pointed at a real stack's folder and its purge wiped the real history.) A folder without a marker (older versions) is adopted.
+SERVER_UUID="$(mysql -h mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" -N -B -e 'select @@server_uuid' 2>/dev/null || true)"
+if [[ -z "${SERVER_UUID}" ]]; then
+    echo "[backup] ERROR: cannot read the MySQL server identity, refusing to run"; sleep 300; exit 1
+fi
+OWNER_FILE=/backups/.owner
+if [[ -f "${OWNER_FILE}" && "$(head -n1 "${OWNER_FILE}")" != "${SERVER_UUID}" ]]; then
+    echo "[backup] ERROR: /backups belongs to ANOTHER database ($(head -n1 "${OWNER_FILE}")), this one is ${SERVER_UUID}."
+    echo "[backup] ERROR: refusing to write or purge there. Give this stack its own BACKUP_DIR (the compose project name is appended)."
+    sleep 300; exit 1
+fi
+printf '%s\n# folder owned by the MySQL server above; written by backup.sh\n' "${SERVER_UUID}" > "${OWNER_FILE}"
 
 # rclone remote "backup" defined through the environment (no config file to ship or leak). Same variables as before:
 # MINIO_ACCESS_KEY / MINIO_SECRET_KEY are simply the S3 credentials of the storage (SeaweedFS), whatever the name.
@@ -16,6 +33,24 @@ export RCLONE_CONFIG_BACKUP_PROVIDER=SeaweedFS
 export RCLONE_CONFIG_BACKUP_ENDPOINT="http://seaweedfs:8333"
 export RCLONE_CONFIG_BACKUP_ACCESS_KEY_ID="${MINIO_ACCESS_KEY}"
 export RCLONE_CONFIG_BACKUP_SECRET_ACCESS_KEY="${MINIO_SECRET_KEY}"
+
+# Retention: delete what is older than RETENTION_DAYS, BUT never the newest KEEP_MIN of each series, whatever their age. Only this
+# script's own names are considered (<db>-*.sql.gz and <YYYYMMDD-HHMMSS> snapshot folders), nothing else in the folder is touched.
+is_older_than_retention() { [[ -n "$(find "$1" -maxdepth 0 -mtime "+${RETENTION_DAYS}")" ]]; }
+
+prune() {
+    local db f d
+    for db in "${MONOKEK_DB_NAME}" "${PMS_DB_NAME}"; do
+        while IFS= read -r f; do
+            [[ -n "${f}" ]] || continue
+            if is_older_than_retention "${f}"; then rm -f -- "${f}" && echo "[backup] purged ${f}"; fi
+        done < <(find /backups/mysql -maxdepth 1 -type f -name "${db}-*.sql.gz" -printf '%T@ %p\n' | sort -rn | tail -n +"$((KEEP_MIN + 1))" | cut -d' ' -f2-)
+    done
+    while IFS= read -r d; do
+        [[ -n "${d}" ]] || continue
+        if is_older_than_retention "${d}"; then rm -rf -- "${d}" && echo "[backup] purged ${d}"; fi
+    done < <(find /backups/minio -maxdepth 1 -mindepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{8}-[0-9]{6}' -printf '%T@ %p\n' | sort -rn | tail -n +"$((KEEP_MIN + 1))" | cut -d' ' -f2-)
+}
 
 run_backup() {
     local stamp
@@ -43,8 +78,7 @@ run_backup() {
     rclone copy --quiet "backup:${MINIO_BUCKET}" "/backups/minio/${stamp}" \
         || echo "[backup] WARN: storage mirror failed, continuing"
 
-    find /backups/mysql -name '*.sql.gz' -mtime "+${RETENTION_DAYS}" -delete
-    find /backups/minio -maxdepth 1 -mindepth 1 -type d -mtime "+${RETENTION_DAYS}" -exec rm -rf {} +
+    prune
 
     echo "[backup] Run ${stamp} done"
 }

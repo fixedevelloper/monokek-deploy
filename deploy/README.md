@@ -44,11 +44,26 @@ Les postes Tauri du LAN doivent être compilés avec
 
 ## Sauvegardes
 
-Le service `backup` tourne en continu, dump les deux bases MySQL et miroire
+Le service `backup` tourne en continu, dump les deux bases MySQL et copie
 le bucket de stockage toutes les `BACKUP_INTERVAL_SECONDS` (24h par défaut), dans
-`./deploy/backups/`, avec purge après `BACKUP_RETENTION_DAYS` jours (7 par
-défaut). Penser à copier ce dossier hors du serveur périodiquement — un
-volume Docker local n'est pas une vraie sauvegarde en cas de panne matérielle.
+`./deploy/backups/<nom du projet compose>/` (par défaut `./deploy/backups/monokek/`). Penser à copier ce
+dossier hors du serveur périodiquement — un volume Docker local n'est pas une vraie sauvegarde en cas
+de panne matérielle.
+
+**Protections contre une purge qui efface l'historique** (un incident réel : une pile de test lancée avec
+le même compose avait vidé les sauvegardes de la vraie pile) :
+
+- **Un sous-dossier par projet compose** : `docker compose -p test up` écrit dans `deploy/backups/test/`, jamais
+  dans celui de la vraie pile. `BACKUP_DIR` déplace le dossier parent (autre disque) ; le nom du projet est ajouté.
+  Ce n'est volontairement pas un volume nommé : `docker compose down -v` supprimerait les sauvegardes avec la base.
+- **Plancher** : la purge ne supprime jamais les `BACKUP_KEEP_MIN` plus récentes sauvegardes (7 par défaut) de chaque
+  base et de chaque copie du stockage, quel que soit leur âge ; au-delà, seules celles de plus de `BACKUP_RETENTION_DAYS`
+  jours (7) partent. Elle ne touche que les fichiers de ce script (`<base>-AAAAMMJJ-HHMMSS.sql.gz`, dossiers `AAAAMMJJ-HHMMSS`).
+- **Marqueur de propriétaire** (`.owner` : identité du serveur MySQL) : une pile dont la base est différente **refuse d'écrire et
+  de purger** dans un dossier qui appartient à une autre base, et le dit dans ses logs (`belongs to ANOTHER database`).
+
+Ces deux dernières protections sont dans l'image `monokek-backup` (à reconstruire et republier).
+Avant de lancer une pile de test avec ce compose, vérifier `docker compose -p <nom> config | grep -A3 backups`.
 
 ## Rotation de la clé de signature des jetons
 
