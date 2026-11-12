@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds and publishes monokek-spring, pms-modulith and the backup image to
+# Builds and publishes monokek-identity, monokek-spring, pms-modulith and the backup image to
 # Docker Hub. Run from the repo root: ./deploy/build-and-push.sh [tag]
 #
 # Requires `docker login` for an account with push access to
@@ -26,6 +26,7 @@ build_and_push() {
     docker push "${image}"
 }
 
+build_and_push monokek-identity ./monokek-identity
 build_and_push monokek-spring ./monokek-spring
 build_and_push pms-modulith ./pms/pms-modulith
 build_and_push monokek-backup ./deploy/backup
