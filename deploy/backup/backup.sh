@@ -9,7 +9,13 @@ INTERVAL_SECONDS="${BACKUP_INTERVAL_SECONDS:-86400}"
 
 mkdir -p /backups/mysql /backups/minio
 
-mc alias set backup-target "http://seaweedfs:8333" "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}" >/dev/null
+# rclone remote "backup" defined through the environment (no config file to ship or leak). Same variables as before:
+# MINIO_ACCESS_KEY / MINIO_SECRET_KEY are simply the S3 credentials of the storage (SeaweedFS), whatever the name.
+export RCLONE_CONFIG_BACKUP_TYPE=s3
+export RCLONE_CONFIG_BACKUP_PROVIDER=SeaweedFS
+export RCLONE_CONFIG_BACKUP_ENDPOINT="http://seaweedfs:8333"
+export RCLONE_CONFIG_BACKUP_ACCESS_KEY_ID="${MINIO_ACCESS_KEY}"
+export RCLONE_CONFIG_BACKUP_SECRET_ACCESS_KEY="${MINIO_SECRET_KEY}"
 
 run_backup() {
     local stamp
@@ -33,7 +39,8 @@ run_backup() {
         fi
     done
 
-    mc mirror --quiet "backup-target/${MINIO_BUCKET}" "/backups/minio/${stamp}" \
+    # "copy" into a dated folder: nothing is ever deleted from the bucket, each run is a full snapshot (same as the old mc mirror).
+    rclone copy --quiet "backup:${MINIO_BUCKET}" "/backups/minio/${stamp}" \
         || echo "[backup] WARN: storage mirror failed, continuing"
 
     find /backups/mysql -name '*.sql.gz' -mtime "+${RETENTION_DAYS}" -delete

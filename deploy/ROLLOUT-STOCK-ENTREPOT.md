@@ -28,8 +28,7 @@ UPDATE ingredients i
 SET i.stock = s.qty, i.alert_qty = s.alert_qty;
 ```
 Valable tant que seuls l'entrepôt et les ventes ont bougé. Si des quantités ont été distribuées à des succursales
-(phases suivantes), restaurer plutôt la sauvegarde. Les colonnes ajoutées (`location_id`, `reference_*`) sont sans effet
-sur l'ancien code ; `warehouse` reste dans `roles`.
+(phases suivantes), restaurer plutôt la sauvegarde. **Attention : `location_id` est obligatoire sur 3 tables (`stock_movements`, `product_stock_movements`, `purchase_orders`) et l'ancien code ne le renseigne pas : sans le SQL de la section « Marche arrière complète » ci-dessous, ajustements de stock, achats et déduction à la vente échouent.** `warehouse` reste dans `roles`.
 
 ## Limites de la phase 1
 - Les produits revendables gardent leur stock actuel (par ligne produit) : achats de produits inchangés.
@@ -292,3 +291,49 @@ déjà fusionnés restent masqués (`deleted_at`), comme n'importe quel produit 
 5. **Une succursale pilote** : premiers transferts entrepôt -> succursale, avec réception et écart.
 6. **Catalogue commun** : partager catégories puis produits entre succursales (le serveur impose l'ordre).
 7. **Doublons en dernier**, après au moins un service complet sur le catalogue commun : sauvegarde, un SKU, vérification en caisse, puis le reste.
+
+---
+
+# Image de sauvegarde (`monokek-backup`) : réparée
+
+- **Problème** : l'image ne se reconstruisait plus (MinIO a retiré `mc` partout : Docker Hub, Quay, téléchargement direct « 410 Gone »). Les tags `cuisine-centrale-1` et
+  `stock-entrepot-1` de `monokek-backup` sont des **re-étiquetages d'un ancien build** : ils visent un hôte `minio` qui n'existe plus et **plantent en boucle**
+  avec le compose actuel (SeaweedFS). Ces deux tags ne sont donc pas utilisables.
+- **Correction** : `deploy/backup/Dockerfile` et `backup.sh` utilisent `rclone` 1.68.2 (version fixée) à la place de `mc`. Les variables d'environnement sont inchangées.
+  Image publiée : `monokek-backup:stock-entrepot-2`. `build-and-push.sh` la reconstruit de nouveau normalement.
+- **Vérifié** (conteneurs jetables) : les deux bases sont sauvegardées et un dump **se restaure** (mêmes lignes), le contenu du stockage est copié, le conteneur ne plante plus.
+- **À savoir** : la copie du stockage reste un simple avertissement si elle échoue (`WARN: storage mirror failed`) ; le conteneur continue. Surveillez cette ligne dans ses logs.
+- **Au déploiement** : le compose utilise un seul `IMAGE_TAG`. Mettre `monokek-backup` en `stock-entrepot-2` (ou re-étiqueter spring et pms en `-2` pour tout aligner).
+  Après la mise à jour, **vérifier qu'une sauvegarde est bien produite** (`deploy/backups/mysql/*.sql.gz` non vide) avant de s'y fier.
+
+
+---
+
+# Marche arrière complète : répétée sur une pile de test
+
+Deux voies, **toutes deux essayées** (base de départ `cuisine-centrale-1` avec des données, mise à niveau vers `stock-entrepot-2`, puis retour).
+
+## Voie A : restaurer la sauvegarde (la plus sûre, perd ce qui s'est passé depuis la mise à jour)
+1. Arrêter spring, identity et pms. 2. `DROP DATABASE` puis `CREATE DATABASE` de la base `monokek`, y recharger le dump du §0 (`zcat monokek-….sql.gz | mysql monokek`).
+3. `IMAGE_TAG` sur l'ancien tag, relancer. **Résultat vérifié** : Flyway indique « Schema is up to date », les 10 compteurs de contrôle sont identiques à ceux d'avant
+   (produits, commandes, paiements et leur total, tickets, comptes, stocks), les tables du nouveau modèle ont disparu, les utilisateurs se reconnectent.
+   Les ventes faites depuis la mise à jour sont perdues avec le reste.
+
+## Voie B : garder la base, ne revenir qu'au code (garde les ventes faites depuis, mais exige ce SQL)
+L'ancien serveur **démarre** sur la base migrée (Flyway ignore les migrations « futures »), **mais sans ce SQL le stock ne fonctionne plus** : `Field 'location_id' doesn't have a default value`
+(ajustement de stock 500, achat 500, déduction à la vente perdue en silence). Avec ce SQL, tout repasse (vente, encaissement, ajustements, achats : vérifié) :
+```sql
+ALTER TABLE stock_movements         MODIFY COLUMN location_id BIGINT UNSIGNED NULL;
+ALTER TABLE product_stock_movements MODIFY COLUMN location_id BIGINT UNSIGNED NULL;
+ALTER TABLE purchase_orders         MODIFY COLUMN location_id BIGINT UNSIGNED NULL;
+-- puis les deux recopies de stock des sections « Marche arrière » ci-dessus (ingrédients depuis l'entrepôt, produits depuis la succursale d'origine)
+```
+Limites : prix locaux ignorés, produits/catégories partagés disparaissent des autres succursales, stock d'une succursale autre que celle d'origine perdu (voir plus haut).
+Si le partage, les transferts ou la fusion ont servi, **préférer la voie A**.
+
+## À savoir
+- **identity** : revenir à l'ancienne image réintroduit le défaut du rafraîchissement de session. Garder `monokek-identity:stock-entrepot-2` même après un retour de spring.
+- Au passage `stock-entrepot-2` : les sessions déjà rafraîchies une fois **sous l'ancien code** ne peuvent plus l'être (401) : leurs utilisateurs se reconnectent une fois.
+  Celles jamais rafraîchies continuent de fonctionner.
+- Le registre d'événements de Spring Modulith a eu un **deadlock MySQL intermittent** (vu sous l'ancien code aussi : préexistant) : une ligne reste « non terminée » dans `EVENT_PUBLICATION`.
+  Sans effet tant que la republication au redémarrage reste désactivée (c'est le cas) ; ne pas l'activer sans y avoir regardé.
